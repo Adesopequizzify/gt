@@ -5,27 +5,46 @@ import axios from 'axios';
 const app = express();
 app.use(bodyParser.json());
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const BOT_TOKEN = '7653336178:AAE8KKXEKFILBP6j86OvsYWFPKq4DPnXlmA';
+const CHANNEL_ID = '@swhit_tg';
 
-// Webhook endpoint
-app.post('/webhook', async (req, res) => {
-  const { message } = req.body;
-  if (message && message.text) {
-    await handleMessage(message);
+async function validateBot() {
+  if (!BOT_TOKEN) {
+    throw new Error('BOT_TOKEN is not set');
   }
-  res.sendStatus(200);
-});
+  if (!CHANNEL_ID) {
+    throw new Error('CHANNEL_ID is not set');
+  }
+
+  try {
+    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
+    console.log('Bot validation successful:', response.data.result.username);
+    
+    const channelTest = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getChat`, {
+      params: { chat_id: CHANNEL_ID }
+    });
+    console.log('Channel validation successful:', channelTest.data.result.title);
+    
+    return true;
+  } catch (error) {
+    console.error('Bot validation failed:', error.response?.data || error.message);
+    throw new Error('Bot validation failed');
+  }
+}
 
 async function handleMessage(message) {
   const { text, chat } = message;
+  console.log('Received message:', text);
 
-  if (text === '/createnewpost') {
+  if (text === '/start') {
+    await sendMessage(chat.id, 'Bot is active and ready to create posts! Use /createnewpost to begin.');
+  } else if (text === '/createnewpost') {
     await startNewPost(chat.id);
   }
 }
 
 async function startNewPost(chatId) {
+  console.log('Starting new post for chat ID:', chatId);
   const steps = [
     'Enter the post title:',
     'Enter the post content:',
@@ -44,6 +63,7 @@ async function startNewPost(chatId) {
   for (let i = 0; i < steps.length; i++) {
     await sendMessage(chatId, steps[i]);
     const response = await waitForResponse(chatId);
+    console.log(`Step ${i + 1} response:`, response);
 
     switch (i) {
       case 0:
@@ -70,6 +90,7 @@ async function startNewPost(chatId) {
           }
           await sendMessage(chatId, 'Enter next link (or "done" to finish):');
           response = await waitForResponse(chatId);
+          console.log('Additional link response:', response);
         }
         break;
     }
@@ -79,12 +100,14 @@ async function startNewPost(chatId) {
 }
 
 async function sendPreview(chatId, postData) {
+  console.log('Sending preview for chat ID:', chatId);
   const previewText = formatMessage(postData);
   await sendMessage(chatId, 'Here\'s a preview of your post:');
   await sendMessage(chatId, previewText, 'HTML', postData.button);
   await sendMessage(chatId, 'Do you want to send this post? (yes/no)');
 
   const response = await waitForResponse(chatId);
+  console.log('Preview response:', response);
   if (response.toLowerCase() === 'yes') {
     await sendFormattedMessage(postData);
     await sendMessage(chatId, 'Post sent to the channel successfully!');
@@ -104,21 +127,28 @@ function formatMessage(postData) {
 }
 
 async function sendFormattedMessage(postData) {
+  console.log('Sending formatted message to channel:', CHANNEL_ID);
   const messageText = formatMessage(postData);
 
   const inlineKeyboard = postData.button ? 
     { inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]] } :
     undefined;
 
-  await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    chat_id: CHANNEL_ID,
-    text: messageText,
-    parse_mode: 'HTML',
-    reply_markup: inlineKeyboard
-  });
+  try {
+    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      chat_id: CHANNEL_ID,
+      text: messageText,
+      parse_mode: 'HTML',
+      reply_markup: inlineKeyboard
+    });
+    console.log('Message sent successfully:', response.data);
+  } catch (error) {
+    console.error('Error sending message:', error.response ? error.response.data : error.message);
+  }
 }
 
 async function sendMessage(chatId, text, parseMode = 'HTML', button = null) {
+  console.log(`Sending message to chat ID ${chatId}:`, text);
   const payload = {
     chat_id: chatId,
     text: text,
@@ -131,23 +161,67 @@ async function sendMessage(chatId, text, parseMode = 'HTML', button = null) {
     };
   }
 
-  await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
+  try {
+    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
+    console.log('Message sent successfully:', response.data);
+  } catch (error) {
+    console.error('Error sending message:', error.response ? error.response.data : error.message);
+  }
 }
 
 function waitForResponse(chatId) {
+  console.log(`Waiting for response from chat ID:`, chatId);
   return new Promise((resolve) => {
     app.once('message', (message) => {
       if (message.chat.id === chatId) {
+        console.log('Received response:', message.text);
         resolve(message.text);
       }
     });
   });
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+app.post('/webhook', async (req, res) => {
+  try {
+    console.log('Received webhook:', req.body);
+    const { message } = req.body;
+    if (message && message.text) {
+      await handleMessage(message);
+    }
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Webhook error:', error);
+    res.sendStatus(500);
+  }
 });
 
-// For testing purposes
-console.log('Telegram Bot Webhook is set up and running!');
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+async function startServer() {
+  try {
+    console.log('Validating bot configuration...');
+    await validateBot();
+    
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+      console.log('Bot is ready to receive messages');
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+console.log('Testing bot configuration...');
+validateBot()
+  .then(() => console.log('Bot configuration is valid'))
+  .catch(error => {
+    console.error('Bot configuration is invalid:', error.message);
+    process.exit(1);
+  });
+
