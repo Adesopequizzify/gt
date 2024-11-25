@@ -1,7 +1,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
-import fs from 'fs/promises';
+import { promises as fs } from 'fs';
 import crypto from 'crypto';
 
 const app = express();
@@ -154,6 +154,10 @@ async function handleMessage(message) {
 }
 
 async function handleAuthorization(chatId) {
+  if (chatId.toString() === ADMIN_ID) {
+    await sendMessage(chatId, 'You are already authorized as the admin.');
+    return;
+  }
   const authCode = crypto.randomInt(100000, 999999).toString();
   pendingAuthorizations.set(chatId, authCode);
   await sendMessage(ADMIN_ID, `User ${chatId} is requesting authorization. Their code is: ${authCode}`);
@@ -162,11 +166,23 @@ async function handleAuthorization(chatId) {
 
 async function isAuthorized(chatId) {
   try {
-    const authorizedUsers = JSON.parse(await fs.readFile('authorized_users.json', 'utf8'));
+    let authorizedUsers = [];
+    try {
+      const data = await fs.readFile('authorized_users.json', 'utf8');
+      authorizedUsers = JSON.parse(data);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        // File doesn't exist, create it with the admin ID
+        authorizedUsers = [ADMIN_ID];
+        await fs.writeFile('authorized_users.json', JSON.stringify(authorizedUsers));
+      } else {
+        console.error('Error reading authorized_users.json:', error);
+      }
+    }
     return authorizedUsers.includes(chatId.toString());
   } catch (error) {
     console.error('Error checking authorization:', error);
-    return false;
+    return chatId.toString() === ADMIN_ID; // Always allow admin
   }
 }
 
@@ -174,9 +190,12 @@ async function addAuthorizedUser(chatId) {
   try {
     let authorizedUsers = [];
     try {
-      authorizedUsers = JSON.parse(await fs.readFile('authorized_users.json', 'utf8'));
+      const data = await fs.readFile('authorized_users.json', 'utf8');
+      authorizedUsers = JSON.parse(data);
     } catch (error) {
-      // File doesn't exist or is empty, start with an empty array
+      if (error.code !== 'ENOENT') {
+        console.error('Error reading authorized_users.json:', error);
+      }
     }
     if (!authorizedUsers.includes(chatId.toString())) {
       authorizedUsers.push(chatId.toString());
@@ -329,17 +348,37 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+async function initializeAuthorizedUsers() {
+  try {
+    await fs.access('authorized_users.json');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      // File doesn't exist, create it with the admin ID
+      await fs.writeFile('authorized_users.json', JSON.stringify([ADMIN_ID]));
+      console.log('Created authorized_users.json with admin ID');
+    } else {
+      console.error('Error checking authorized_users.json:', error);
+    }
+  }
+}
+
 // Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  const isValid = await validateBot();
-  if (isValid) {
-    console.log(`Server is running on port ${PORT}`);
-    console.log('Bot is ready to receive messages');
-  } else {
-    console.error('Bot validation failed. Shutting down...');
+async function startServer() {
+  try {
+    console.log('Validating bot configuration...');
+    await validateBot();
+    await initializeAuthorizedUsers();
+    
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+      console.log('Bot is ready to receive messages');
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
     process.exit(1);
   }
-});
+}
 
+startServer();
 
