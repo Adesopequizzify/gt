@@ -1,27 +1,47 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
-import https from 'https';
 import FormData from 'form-data';
-import { Readable } from 'stream';
 
 const app = express();
 app.use(bodyParser.json());
 
 const BOT_TOKEN = '7653336178:AAE8KKXEKFILBP6j86OvsYWFPKq4DPnXlmA';
-const CHANNEL_ID = '@swhit_tg';
+// Update channel ID to match your actual channel
+const CHANNEL_USERNAME = '@swhit_tg'; // Make sure this matches EXACTLY with your channel username
 const ADMIN_ID = '6761051997';
 const ADMIN_USERNAME = '@Techque_tg';
-
-// Create a custom axios instance with a longer timeout
-const axiosInstance = axios.create({
-  timeout: 30000, // 30 seconds
-  httpsAgent: new https.Agent({ keepAlive: true })
-});
 
 // Store active conversations and authorized users
 const conversations = new Map();
 const authorizedUsers = new Set([ADMIN_ID]);
+
+// Utility function to verify channel membership and permissions
+async function verifyBotChannelPermissions() {
+  try {
+    // First verify if bot is admin in the channel
+    const chatAdmins = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getChatAdministrators`, {
+      params: { chat_id: CHANNEL_USERNAME }
+    });
+    
+    const botInfo = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
+    const botId = botInfo.data.result.id;
+    
+    const isAdmin = chatAdmins.data.result.some(admin => 
+      admin.user.id === botId && 
+      (admin.status === 'administrator' || admin.status === 'creator')
+    );
+
+    if (!isAdmin) {
+      throw new Error('Bot is not an administrator in the channel');
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Channel verification failed:', error.response?.data || error.message);
+    return false;
+  }
+}
 
 class Conversation {
   constructor(chatId) {
@@ -56,7 +76,7 @@ class Conversation {
                 await sendMessage(this.chatId, 'Failed to process image. Please try again or type "skip".');
                 return false;
               }
-              this.data.image = fileId; // Store the file_id instead of the URL
+              this.data.image = fileId; // Store the file_id directly instead of URL
               return true;
             } catch (error) {
               console.error('Error processing image:', error);
@@ -138,14 +158,115 @@ class Conversation {
   }
 }
 
-async function validateBot() {
+async function sendFormattedMessage(postData) {
   try {
-    const response = await axiosInstance.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
-    console.log('Bot validation successful:', response.data.result.username);
-    return true;
+    // Verify channel permissions first
+    const hasPermissions = await verifyBotChannelPermissions();
+    if (!hasPermissions) {
+      throw new Error('Bot does not have required permissions in the channel');
+    }
+
+    const messageText = formatMessage(postData);
+    const inlineKeyboard = postData.button ? 
+      { inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]] } :
+      undefined;
+
+    let response;
+    if (postData.image) {
+      // Using file_id directly for sending photos
+      const photoPayload = {
+        chat_id: CHANNEL_USERNAME,
+        photo: postData.image,
+        caption: messageText,
+        parse_mode: 'HTML'
+      };
+
+      if (inlineKeyboard) {
+        photoPayload.reply_markup = JSON.stringify(inlineKeyboard);
+      }
+
+      response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, photoPayload);
+    } else {
+      const messagePayload = {
+        chat_id: CHANNEL_USERNAME,
+        text: messageText,
+        parse_mode: 'HTML'
+      };
+
+      if (inlineKeyboard) {
+        messagePayload.reply_markup = JSON.stringify(inlineKeyboard);
+      }
+
+      response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, messagePayload);
+    }
+
+    if (!response.data.ok) {
+      throw new Error(response.data.description || 'Failed to send message to channel');
+    }
+
+    return response.data;
   } catch (error) {
-    console.error('Bot validation failed:', error.response?.data || error.message);
-    return false;
+    console.error('Error sending formatted message:', error.response?.data || error);
+    throw new Error(`Failed to send post: ${error.response?.data?.description || error.message}`);
+  }
+}
+
+async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null) {
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: parseMode
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup);
+  }
+
+  try {
+    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
+    if (!response.data.ok) {
+      throw new Error(response.data.description);
+    }
+    return response.data;
+  } catch (error) {
+    console.error('Error sending message:', error.response?.data || error);
+    throw error;
+  }
+}
+
+async function sendPhoto(chatId, photoId, caption, replyMarkup = null) {
+  try {
+    const payload = {
+      chat_id: chatId,
+      photo: photoId,
+      caption: caption,
+      parse_mode: 'HTML'
+    };
+
+    if (replyMarkup) {
+      payload.reply_markup = typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup);
+    }
+
+    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
+    if (!response.data.ok) {
+      throw new Error(response.data.description);
+    }
+    return response.data;
+  } catch (error) {
+    console.error('Error sending photo:', error.response?.data || error);
+    throw new Error(error.response?.data?.description || 'Failed to send photo');
+  }
+}
+
+async function getFile(fileId) {
+  try {
+    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
+      params: { file_id: fileId }
+    });
+    return response.data.result;
+  } catch (error) {
+    console.error('Error getting file:', error.response?.data || error.message);
+    throw error;
   }
 }
 
@@ -204,18 +325,12 @@ async function handleCallbackQuery(callbackQuery) {
     const conversation = conversations.get(chatId);
     if (conversation) {
       try {
-        const result = await sendFormattedMessage(conversation.data);
-        if (result.ok) {
-          await sendMessage(chatId, '✅ Post sent to the channel successfully!');
-        } else {
-          throw new Error(result.description || 'Unknown error occurred');
-        }
+        await sendFormattedMessage(conversation.data);
+        await sendMessage(chatId, 'Post sent to the channel successfully!');
       } catch (error) {
-        console.error('Error sending post:', error);
-        await sendMessage(chatId, `❌ Error sending post: ${error.message}`);
-      } finally {
-        conversations.delete(chatId);
+        await sendMessage(chatId, `Error sending post: ${error.message}`);
       }
+      conversations.delete(chatId);
     }
   } else if (data === 'edit_post') {
     const chatId = message.chat.id.toString();
@@ -239,12 +354,12 @@ async function handleCallbackQuery(callbackQuery) {
   }
 
   try {
-    await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
       callback_query_id: callbackQuery.id
     });
 
     // Remove the inline keyboard after admin's action
-    await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
       chat_id: message.chat.id,
       message_id: message.message_id,
       reply_markup: JSON.stringify({ inline_keyboard: [] })
@@ -261,20 +376,7 @@ async function sendPreview(chatId, postData) {
     
     if (postData.image) {
       try {
-        const payload = {
-          chat_id: chatId,
-          photo: postData.image,
-          caption: previewText,
-          parse_mode: 'HTML'
-        };
-
-        if (postData.button) {
-          payload.reply_markup = JSON.stringify({
-            inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
-          });
-        }
-
-        await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
+        await sendPhoto(chatId, postData.image, previewText);
       } catch (error) {
         console.error('Error sending photo preview:', error);
         await sendMessage(chatId, 'Failed to preview image, but the post content is:\n\n' + previewText, 'HTML', postData.button);
@@ -308,77 +410,15 @@ function formatMessage(postData) {
   return messageText;
 }
 
-async function sendFormattedMessage(postData) {
-  const messageText = formatMessage(postData);
 
+async function validateBot() {
   try {
-    if (postData.image) {
-      const payload = {
-        chat_id: CHANNEL_ID,
-        photo: postData.image,
-        caption: messageText,
-        parse_mode: 'HTML'
-      };
-
-      if (postData.button) {
-        payload.reply_markup = JSON.stringify({
-          inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
-        });
-      }
-
-      const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
-      return response.data;
-    } else {
-      const payload = {
-        chat_id: CHANNEL_ID,
-        text: messageText,
-        parse_mode: 'HTML'
-      };
-
-      if (postData.button) {
-        payload.reply_markup = JSON.stringify({
-          inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
-        });
-      }
-
-      const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
-      return response.data;
-    }
+    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
+    console.log('Bot validation successful:', response.data.result.username);
+    return true;
   } catch (error) {
-    console.error('Error sending formatted message:', error.response?.data || error);
-    throw new Error(error.response?.data?.description || 'Failed to send message to channel');
-  }
-}
-
-async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null) {
-  const payload = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: parseMode
-  };
-
-  if (replyMarkup) {
-    payload.reply_markup = typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup);
-  }
-
-  try {
-    const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
-    return response.data;
-  } catch (error) {
-    console.error('Error sending message:', error.response?.data || error.message);
-    throw error;
-  }
-}
-
-async function getFile(fileId) {
-  try {
-    const response = await axiosInstance.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
-      params: { file_id: fileId }
-    });
-    return response.data.result;
-  } catch (error) {
-    console.error('Error getting file:', error.response?.data || error.message);
-    throw error;
+    console.error('Bot validation failed:', error.response?.data || error.message);
+    return false;
   }
 }
 
@@ -403,16 +443,27 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Start server
+// Start server with additional error handling
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  const isValid = await validateBot();
-  if (isValid) {
+  try {
+    const isValid = await validateBot();
+    if (!isValid) {
+      throw new Error('Bot validation failed');
+    }
+    
+    const hasPermissions = await verifyBotChannelPermissions();
+    if (!hasPermissions) {
+      throw new Error('Bot does not have required permissions in the channel');
+    }
+    
     console.log(`Server is running on port ${PORT}`);
     console.log('Bot is ready to receive messages');
-  } else {
-    console.error('Bot validation failed. Shutting down...');
+    console.log(`Channel: ${CHANNEL_USERNAME}`);
+  } catch (error) {
+    console.error('Startup error:', error.message);
     process.exit(1);
   }
 });
 
+      
