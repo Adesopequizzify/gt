@@ -1,15 +1,20 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
+import fs from 'fs/promises';
+import crypto from 'crypto';
 
 const app = express();
 app.use(bodyParser.json());
 
 const BOT_TOKEN = '7653336178:AAE8KKXEKFILBP6j86OvsYWFPKq4DPnXlmA';
 const CHANNEL_ID = '@swhit_tg';
+const ADMIN_ID = '6761051997';
+const ADMIN_USERNAME = '@Techque_tg';
 
 // Store active conversations
 const conversations = new Map();
+const pendingAuthorizations = new Map();
 
 // Conversation state handler
 class Conversation {
@@ -17,20 +22,36 @@ class Conversation {
     this.chatId = chatId;
     this.currentStep = 0;
     this.data = {
-      title: '',
       content: '',
       button: null,
-      links: []
+      links: [],
+      image: null
     };
     this.steps = [
-      { prompt: 'Enter the post title:', handler: (text) => this.data.title = text },
       { prompt: 'Enter the post content:', handler: (text) => this.data.content = text },
+      { 
+        prompt: 'Send an image for the post (or type "skip" to skip):',
+        handler: async (message) => {
+          if (message.text && message.text.toLowerCase() === 'skip') {
+            return true;
+          }
+          if (message.photo) {
+            const fileId = message.photo[message.photo.length - 1].file_id;
+            const fileInfo = await getFile(fileId);
+            this.data.image = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+            return true;
+          }
+          await sendMessage(this.chatId, 'Please send an image or type "skip".');
+          return false;
+        }
+      },
       { 
         prompt: 'Enter button text (or "skip" to skip):', 
         handler: (text) => {
           if (text.toLowerCase() !== 'skip') {
             this.data.button = { text };
           }
+          return true;
         }
       },
       {
@@ -39,6 +60,7 @@ class Conversation {
           if (this.data.button && text.toLowerCase() !== 'skip') {
             this.data.button.url = text;
           }
+          return true;
         }
       },
       {
@@ -61,11 +83,11 @@ class Conversation {
     ];
   }
 
-  async handleResponse(text) {
+  async handleResponse(message) {
     if (this.currentStep >= this.steps.length) return;
 
     const step = this.steps[this.currentStep];
-    const result = await step.handler(text);
+    const result = await step.handler(message);
     
     if (result !== false) {
       this.currentStep++;
@@ -101,7 +123,20 @@ async function handleMessage(message) {
   const chatId = chat.id;
 
   if (text === '/start') {
-    await sendMessage(chatId, 'Bot is active and ready to create posts! Use /createnewpost to begin.');
+    await sendMessage(chatId, 'Welcome! Here are the available commands:\n\n' +
+      '/start - Show this message\n' +
+      '/createnewpost - Start creating a new post\n' +
+      '/authorize - Request authorization to use the bot');
+    return;
+  }
+
+  if (text === '/authorize') {
+    await handleAuthorization(chatId);
+    return;
+  }
+
+  if (!(await isAuthorized(chatId))) {
+    await sendMessage(chatId, 'You are not authorized to use this bot. Please use /authorize to request access.');
     return;
   }
 
@@ -114,31 +149,65 @@ async function handleMessage(message) {
 
   const activeConversation = conversations.get(chatId);
   if (activeConversation) {
-    await activeConversation.handleResponse(text);
+    await activeConversation.handleResponse(message);
+  }
+}
+
+async function handleAuthorization(chatId) {
+  const authCode = crypto.randomInt(100000, 999999).toString();
+  pendingAuthorizations.set(chatId, authCode);
+  await sendMessage(ADMIN_ID, `User ${chatId} is requesting authorization. Their code is: ${authCode}`);
+  await sendMessage(chatId, 'Authorization request sent to the admin. Please wait for the admin to provide you with a 6-digit code, then send it here.');
+}
+
+async function isAuthorized(chatId) {
+  try {
+    const authorizedUsers = JSON.parse(await fs.readFile('authorized_users.json', 'utf8'));
+    return authorizedUsers.includes(chatId.toString());
+  } catch (error) {
+    console.error('Error checking authorization:', error);
+    return false;
+  }
+}
+
+async function addAuthorizedUser(chatId) {
+  try {
+    let authorizedUsers = [];
+    try {
+      authorizedUsers = JSON.parse(await fs.readFile('authorized_users.json', 'utf8'));
+    } catch (error) {
+      // File doesn't exist or is empty, start with an empty array
+    }
+    if (!authorizedUsers.includes(chatId.toString())) {
+      authorizedUsers.push(chatId.toString());
+      await fs.writeFile('authorized_users.json', JSON.stringify(authorizedUsers));
+    }
+  } catch (error) {
+    console.error('Error adding authorized user:', error);
   }
 }
 
 async function sendPreview(chatId, postData) {
   const previewText = formatMessage(postData);
   await sendMessage(chatId, 'Here\'s a preview of your post:');
-  await sendMessage(chatId, previewText, 'HTML', postData.button);
-  await sendMessage(chatId, 'Do you want to send this post? (yes/no)');
-
-  // Create a new conversation for the confirmation
-  const confirmConversation = new Map();
-  confirmConversation.set(chatId, async (response) => {
-    if (response.toLowerCase() === 'yes') {
-      await sendFormattedMessage(postData);
-      await sendMessage(chatId, 'Post sent to the channel successfully!');
-    } else {
-      await sendMessage(chatId, 'Post cancelled. You can start over with /createnewpost');
-    }
-    confirmConversation.delete(chatId);
+  if (postData.image) {
+    await sendPhoto(chatId, postData.image, previewText);
+  } else {
+    await sendMessage(chatId, previewText, 'HTML', postData.button);
+  }
+  await sendMessage(chatId, 'Do you want to send this post?', 'HTML', {
+    inline_keyboard: [
+      [
+        { text: 'Send', callback_data: 'send_post' },
+        { text: 'Edit', callback_data: 'edit_post' },
+        { text: 'Discard', callback_data: 'discard_post' }
+      ]
+    ]
   });
 }
 
 function formatMessage(postData) {
-  let messageText = `<b>${postData.title}</b>\n\n${postData.content}\n\n`;
+  let messageText = `${postData.content}\n\n`;
 
   postData.links.forEach(link => {
     messageText += `<a href="${link.url}">${link.text}</a>\n`;
@@ -155,28 +224,25 @@ async function sendFormattedMessage(postData) {
     undefined;
 
   try {
-    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      chat_id: CHANNEL_ID,
-      text: messageText,
-      parse_mode: 'HTML',
-      reply_markup: inlineKeyboard
-    });
+    if (postData.image) {
+      await sendPhoto(CHANNEL_ID, postData.image, messageText, inlineKeyboard);
+    } else {
+      await sendMessage(CHANNEL_ID, messageText, 'HTML', inlineKeyboard);
+    }
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
   }
 }
 
-async function sendMessage(chatId, text, parseMode = 'HTML', button = null) {
+async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null) {
   const payload = {
     chat_id: chatId,
     text: text,
     parse_mode: parseMode
   };
 
-  if (button) {
-    payload.reply_markup = {
-      inline_keyboard: [[{ text: button.text, url: button.url }]]
-    };
+  if (replyMarkup) {
+    payload.reply_markup = JSON.stringify(replyMarkup);
   }
 
   try {
@@ -186,12 +252,44 @@ async function sendMessage(chatId, text, parseMode = 'HTML', button = null) {
   }
 }
 
+async function sendPhoto(chatId, photo, caption, replyMarkup = null) {
+  const payload = {
+    chat_id: chatId,
+    photo: photo,
+    caption: caption,
+    parse_mode: 'HTML'
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = JSON.stringify(replyMarkup);
+  }
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
+  } catch (error) {
+    console.error('Error sending photo:', error.response?.data || error.message);
+  }
+}
+
+async function getFile(fileId) {
+  try {
+    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
+      params: { file_id: fileId }
+    });
+    return response.data.result;
+  } catch (error) {
+    console.error('Error getting file:', error.response?.data || error.message);
+  }
+}
+
 // Webhook endpoint
 app.post('/webhook', async (req, res) => {
   try {
-    const { message } = req.body;
-    if (message && message.text) {
-      await handleMessage(message);
+    const update = req.body;
+    if (update.message) {
+      await handleMessage(update.message);
+    } else if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query);
     }
     res.sendStatus(200);
   } catch (error) {
@@ -199,6 +297,32 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(500);
   }
 });
+
+async function handleCallbackQuery(callbackQuery) {
+  const chatId = callbackQuery.message.chat.id;
+  const data = callbackQuery.data;
+
+  switch (data) {
+    case 'send_post':
+      await sendFormattedMessage(conversations.get(chatId).data);
+      await sendMessage(chatId, 'Post sent to the channel successfully!');
+      conversations.delete(chatId);
+      break;
+    case 'edit_post':
+      const conversation = new Conversation(chatId);
+      conversations.set(chatId, conversation);
+      await conversation.start();
+      break;
+    case 'discard_post':
+      await sendMessage(chatId, 'Post discarded. You can start over with /createnewpost');
+      conversations.delete(chatId);
+      break;
+  }
+
+  await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    callback_query_id: callbackQuery.id
+  });
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -217,3 +341,5 @@ app.listen(PORT, async () => {
     process.exit(1);
   }
 });
+
+
