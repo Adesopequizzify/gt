@@ -25,7 +25,14 @@ class Conversation {
       image: null
     };
     this.steps = [
-      { prompt: 'Enter the post content:', handler: (text) => this.data.content = text },
+      { 
+        prompt: 'Enter the post content:', 
+        handler: async (message) => {
+          if (!message.text) return false;
+          this.data.content = message.text;
+          return true;
+        }
+      },
       { 
         prompt: 'Send an image for the post (or type "skip" to skip):',
         handler: async (message) => {
@@ -44,32 +51,40 @@ class Conversation {
       },
       { 
         prompt: 'Enter button text (or "skip" to skip):', 
-        handler: (text) => {
-          if (text.toLowerCase() !== 'skip') {
-            this.data.button = { text };
+        handler: async (message) => {
+          if (!message.text) return false;
+          if (message.text.toLowerCase() === 'skip') {
+            return true;
           }
+          this.data.button = { text: message.text };
           return true;
         }
       },
       {
         prompt: 'Enter button URL (or "skip" to skip):',
-        handler: (text) => {
-          if (this.data.button && text.toLowerCase() !== 'skip') {
-            this.data.button.url = text;
+        handler: async (message) => {
+          if (!message.text) return false;
+          if (message.text.toLowerCase() === 'skip') {
+            this.data.button = null;
+            return true;
+          }
+          if (this.data.button) {
+            this.data.button.url = message.text;
           }
           return true;
         }
       },
       {
         prompt: 'Enter any additional links (format: text|url, or "done" to finish):',
-        handler: async (text) => {
-          if (text.toLowerCase() === 'done') {
+        handler: async (message) => {
+          if (!message.text) return false;
+          if (message.text.toLowerCase() === 'done') {
             await this.finishConversation();
             return true;
           }
-          const [linkText, url] = text.split('|');
+          const [linkText, url] = message.text.split('|');
           if (linkText && url) {
-            this.data.links.push({ text: linkText, url });
+            this.data.links.push({ text: linkText.trim(), url: url.trim() });
             await sendMessage(this.chatId, 'Link added. Enter another link or type "done" to finish:');
           } else {
             await sendMessage(this.chatId, 'Invalid format. Please use text|url format or type "done" to finish.');
@@ -86,7 +101,7 @@ class Conversation {
     const step = this.steps[this.currentStep];
     const result = await step.handler(message);
     
-    if (result !== false) {
+    if (result) {
       this.currentStep++;
       if (this.currentStep < this.steps.length) {
         await sendMessage(this.chatId, this.steps[this.currentStep].prompt);
@@ -147,7 +162,7 @@ async function handleMessage(message) {
 async function requestAuthorization(message) {
   const { chat } = message;
   const chatId = chat.id.toString();
-  const userName = chat.username ? `@${chat.username}` : `${chat.first_name} ${chat.last_name}`.trim();
+  const userName = chat.username ? `@${chat.username}` : `${chat.first_name} ${chat.last_name || ''}`.trim();
 
   const inlineKeyboard = {
     inline_keyboard: [
@@ -164,15 +179,34 @@ async function requestAuthorization(message) {
 
 async function handleCallbackQuery(callbackQuery) {
   const { data, message } = callbackQuery;
-  const [action, userId] = data.split('_');
-
-  if (action === 'approve') {
-    authorizedUsers.add(userId);
-    await sendMessage(userId, 'Welcome! Your access has been approved. You can now use the bot. Type /start to see available commands.');
-    await sendMessage(ADMIN_ID, `User ${userId} has been approved.`);
-  } else if (action === 'reject') {
-    await sendMessage(userId, 'Sorry, your access request has been denied.');
-    await sendMessage(ADMIN_ID, `User ${userId} has been rejected.`);
+  
+  if (data === 'send_post') {
+    const chatId = message.chat.id.toString();
+    const conversation = conversations.get(chatId);
+    if (conversation) {
+      await sendFormattedMessage(conversation.data);
+      await sendMessage(chatId, 'Post sent to the channel successfully!');
+      conversations.delete(chatId);
+    }
+  } else if (data === 'edit_post') {
+    const chatId = message.chat.id.toString();
+    const conversation = new Conversation(chatId);
+    conversations.set(chatId, conversation);
+    await conversation.start();
+  } else if (data === 'discard_post') {
+    const chatId = message.chat.id.toString();
+    await sendMessage(chatId, 'Post discarded. You can start over with /createnewpost');
+    conversations.delete(chatId);
+  } else {
+    const [action, userId] = data.split('_');
+    if (action === 'approve') {
+      authorizedUsers.add(userId);
+      await sendMessage(userId, 'Welcome! Your access has been approved. You can now use the bot. Type /start to see available commands.');
+      await sendMessage(ADMIN_ID, `User ${userId} has been approved.`);
+    } else if (action === 'reject') {
+      await sendMessage(userId, 'Sorry, your access request has been denied.');
+      await sendMessage(ADMIN_ID, `User ${userId} has been rejected.`);
+    }
   }
 
   await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
@@ -242,7 +276,7 @@ async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null)
   };
 
   if (replyMarkup) {
-    payload.reply_markup = JSON.stringify(replyMarkup);
+    payload.reply_markup = typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup);
   }
 
   try {
@@ -261,7 +295,7 @@ async function sendPhoto(chatId, photo, caption, replyMarkup = null) {
   };
 
   if (replyMarkup) {
-    payload.reply_markup = JSON.stringify(replyMarkup);
+    payload.reply_markup = typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup);
   }
 
   try {
