@@ -56,7 +56,7 @@ class Conversation {
                 await sendMessage(this.chatId, 'Failed to process image. Please try again or type "skip".');
                 return false;
               }
-              this.data.image = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+              this.data.image = fileId; // Store the file_id instead of the URL
               return true;
             } catch (error) {
               console.error('Error processing image:', error);
@@ -204,12 +204,18 @@ async function handleCallbackQuery(callbackQuery) {
     const conversation = conversations.get(chatId);
     if (conversation) {
       try {
-        await sendFormattedMessage(conversation.data);
-        await sendMessage(chatId, 'Post sent to the channel successfully!');
+        const result = await sendFormattedMessage(conversation.data);
+        if (result.ok) {
+          await sendMessage(chatId, '✅ Post sent to the channel successfully!');
+        } else {
+          throw new Error(result.description || 'Unknown error occurred');
+        }
       } catch (error) {
-        await sendMessage(chatId, `Error sending post: ${error.message}`);
+        console.error('Error sending post:', error);
+        await sendMessage(chatId, `❌ Error sending post: ${error.message}`);
+      } finally {
+        conversations.delete(chatId);
       }
-      conversations.delete(chatId);
     }
   } else if (data === 'edit_post') {
     const chatId = message.chat.id.toString();
@@ -255,7 +261,20 @@ async function sendPreview(chatId, postData) {
     
     if (postData.image) {
       try {
-        await sendPhoto(chatId, postData.image, previewText);
+        const payload = {
+          chat_id: chatId,
+          photo: postData.image,
+          caption: previewText,
+          parse_mode: 'HTML'
+        };
+
+        if (postData.button) {
+          payload.reply_markup = JSON.stringify({
+            inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
+          });
+        }
+
+        await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
       } catch (error) {
         console.error('Error sending photo preview:', error);
         await sendMessage(chatId, 'Failed to preview image, but the post content is:\n\n' + previewText, 'HTML', postData.button);
@@ -292,25 +311,42 @@ function formatMessage(postData) {
 async function sendFormattedMessage(postData) {
   const messageText = formatMessage(postData);
 
-  const inlineKeyboard = postData.button ? 
-    { inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]] } :
-    undefined;
-
   try {
     if (postData.image) {
-      const response = await sendPhoto(CHANNEL_ID, postData.image, messageText, inlineKeyboard);
-      if (!response.ok) {
-        throw new Error(response.description || 'Failed to send photo');
+      const payload = {
+        chat_id: CHANNEL_ID,
+        photo: postData.image,
+        caption: messageText,
+        parse_mode: 'HTML'
+      };
+
+      if (postData.button) {
+        payload.reply_markup = JSON.stringify({
+          inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
+        });
       }
+
+      const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload);
+      return response.data;
     } else {
-      const response = await sendMessage(CHANNEL_ID, messageText, 'HTML', inlineKeyboard);
-      if (!response.ok) {
-        throw new Error(response.description || 'Failed to send message');
+      const payload = {
+        chat_id: CHANNEL_ID,
+        text: messageText,
+        parse_mode: 'HTML'
+      };
+
+      if (postData.button) {
+        payload.reply_markup = JSON.stringify({
+          inline_keyboard: [[{ text: postData.button.text, url: postData.button.url }]]
+        });
       }
+
+      const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
+      return response.data;
     }
   } catch (error) {
-    console.error('Error sending message:', error);
-    throw new Error(`Failed to send post: ${error.message}`);
+    console.error('Error sending formatted message:', error.response?.data || error);
+    throw new Error(error.response?.data?.description || 'Failed to send message to channel');
   }
 }
 
@@ -331,37 +367,6 @@ async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null)
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
     throw error;
-  }
-}
-
-async function sendPhoto(chatId, photo, caption, replyMarkup = null) {
-  try {
-    // First try to download the image to verify it's accessible
-    const imageResponse = await axiosInstance.get(photo, { responseType: 'arraybuffer' });
-    
-    const formData = new FormData();
-    formData.append('chat_id', chatId);
-    formData.append('photo', Readable.from(imageResponse.data), { filename: 'photo.jpg' });
-    
-    if (caption) {
-      formData.append('caption', caption);
-      formData.append('parse_mode', 'HTML');
-    }
-
-    if (replyMarkup) {
-      formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
-    }
-
-    const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, formData, {
-      headers: {
-        ...formData.getHeaders()
-      }
-    });
-
-    return response.data;
-  } catch (error) {
-    console.error('Error sending photo:', error.response?.data || error.message);
-    throw new Error(error.response?.data?.description || 'Failed to send photo');
   }
 }
 
@@ -411,4 +416,3 @@ app.listen(PORT, async () => {
   }
 });
 
-                      
