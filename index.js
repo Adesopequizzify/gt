@@ -1,6 +1,9 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
+import https from 'https';
+import FormData from 'form-data';
+import { Readable } from 'stream';
 
 const app = express();
 app.use(bodyParser.json());
@@ -9,6 +12,12 @@ const BOT_TOKEN = '7653336178:AAE8KKXEKFILBP6j86OvsYWFPKq4DPnXlmA';
 const CHANNEL_ID = '@swhit_tg';
 const ADMIN_ID = '6761051997';
 const ADMIN_USERNAME = '@Techque_tg';
+
+// Create a custom axios instance with a longer timeout
+const axiosInstance = axios.create({
+  timeout: 30000, // 30 seconds
+  httpsAgent: new https.Agent({ keepAlive: true })
+});
 
 // Store active conversations and authorized users
 const conversations = new Map();
@@ -131,7 +140,7 @@ class Conversation {
 
 async function validateBot() {
   try {
-    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
+    const response = await axiosInstance.get(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`);
     console.log('Bot validation successful:', response.data.result.username);
     return true;
   } catch (error) {
@@ -224,12 +233,12 @@ async function handleCallbackQuery(callbackQuery) {
   }
 
   try {
-    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+    await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
       callback_query_id: callbackQuery.id
     });
 
     // Remove the inline keyboard after admin's action
-    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
+    await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
       chat_id: message.chat.id,
       message_id: message.message_id,
       reply_markup: JSON.stringify({ inline_keyboard: [] })
@@ -317,7 +326,7 @@ async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null)
   }
 
   try {
-    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
+    const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, payload);
     return response.data;
   } catch (error) {
     console.error('Error sending message:', error.response?.data || error.message);
@@ -328,24 +337,24 @@ async function sendMessage(chatId, text, parseMode = 'HTML', replyMarkup = null)
 async function sendPhoto(chatId, photo, caption, replyMarkup = null) {
   try {
     // First try to download the image to verify it's accessible
-    const imageResponse = await axios.get(photo, { responseType: 'arraybuffer' });
+    const imageResponse = await axiosInstance.get(photo, { responseType: 'arraybuffer' });
     
-    const payload = new FormData();
-    payload.append('chat_id', chatId);
-    payload.append('photo', new Blob([imageResponse.data], { type: imageResponse.headers['content-type'] }));
+    const formData = new FormData();
+    formData.append('chat_id', chatId);
+    formData.append('photo', Readable.from(imageResponse.data), { filename: 'photo.jpg' });
     
     if (caption) {
-      payload.append('caption', caption);
-      payload.append('parse_mode', 'HTML');
+      formData.append('caption', caption);
+      formData.append('parse_mode', 'HTML');
     }
 
     if (replyMarkup) {
-      payload.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
+      formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
     }
 
-    const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, payload, {
+    const response = await axiosInstance.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, formData, {
       headers: {
-        'Content-Type': 'multipart/form-data'
+        ...formData.getHeaders()
       }
     });
 
@@ -358,7 +367,7 @@ async function sendPhoto(chatId, photo, caption, replyMarkup = null) {
 
 async function getFile(fileId) {
   try {
-    const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
+    const response = await axiosInstance.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile`, {
       params: { file_id: fileId }
     });
     return response.data.result;
@@ -402,3 +411,4 @@ app.listen(PORT, async () => {
   }
 });
 
+                      
