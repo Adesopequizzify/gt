@@ -6,7 +6,7 @@ import FormData from 'form-data';
 const app = express();
 app.use(bodyParser.json());
 
-const BOT_TOKEN = '7653336178:AAE8KKXEKFILBP6j86OvsYWFPKq4DPnXlmA';
+const BOT_TOKEN = '7776989255:AAFyoeFwjAOtyHJ3o6_jv3YeSsmy6WRoiBQ';
 // Update channel ID to match your actual channel
 const CHANNEL_USERNAME = '@swhit_tg'; // Make sure this matches EXACTLY with your channel username
 const ADMIN_ID = '6761051997';
